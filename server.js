@@ -35,15 +35,27 @@ async function handleAI(req, res) {
   if (!url || !key) return send(res, 503, { ok: false, error: "AI provider is not configured. Set AI_API_URL, AI_API_KEY and AI_MODEL in .env." });
   const input = await readBody(req);
   const system = String(input.system || "You are a helpful assistant. Answer any question clearly and accurately. Never promise trading profits.");
-  const messages = (Array.isArray(input.messages) && input.messages.length ? input.messages : [{ role: "user", content: String(input.prompt || "") }])
+  const rawMsgs = (Array.isArray(input.messages) && input.messages.length ? input.messages : [{ role: "user", content: String(input.prompt || "") }])
     .slice(-20).map(m => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content).slice(0, 8000) }));
+  const messages = [];
+  for (const m of rawMsgs) {
+    if (!messages.length) {
+      if (m.role === "user") messages.push(m);
+    } else if (messages[messages.length - 1].role !== m.role) {
+      messages.push(m);
+    } else {
+      messages[messages.length - 1].content += "\n" + m.content;
+    }
+  }
+  if (!messages.length) messages.push({ role: "user", content: "Hello" });
+
   const anthropic = /anthropic\.com/.test(url);
   const upstream = await fetch(url, {
     method: "POST",
     headers: anthropic
       ? { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" }
       : { "content-type": "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify(anthropic ? { model, max_tokens: 1024, system, messages } : { model, messages: [{ role: "system", content: system }, ...messages] }),
+    body: JSON.stringify(anthropic ? { model: model || "claude-3-haiku-20240307", max_tokens: 1024, system, messages } : { model: model || "gpt-4o-mini", messages: [{ role: "system", content: system }, ...messages] }),
     signal: AbortSignal.timeout(60_000)
   });
   const data = await upstream.json().catch(() => ({}));
@@ -60,9 +72,12 @@ const server = http.createServer(async (req, res) => {
 
     const file = path.normalize(path.join(publicDir, pathname === "/" ? "index.html" : decodeURIComponent(pathname)));
     if (file !== publicDir && !file.startsWith(publicDir + path.sep)) return send(res, 403, { error: "Forbidden" });
-    fs.readFile(file, (err, data) => err
-      ? send(res, 404, { error: "Not found" })
-      : send(res, 200, data, TYPES[path.extname(file)] || "application/octet-stream"));
+    fs.stat(file, (err, stats) => {
+      if (err || !stats.isFile()) return send(res, 404, { error: "Not found" });
+      fs.readFile(file, (readErr, data) => readErr
+        ? send(res, 500, { error: "Failed to read file" })
+        : send(res, 200, data, TYPES[path.extname(file)] || "application/octet-stream"));
+    });
   } catch (e) {
     send(res, e.status || 500, { ok: false, error: e.message });
   }
